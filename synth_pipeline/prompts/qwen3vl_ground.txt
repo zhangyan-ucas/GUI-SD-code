@@ -1,0 +1,10 @@
+You may call one or more functions to assist with the user query.
+You are provided with function signatures within <tools> ... </tools> XML tags:
+<tools>
+{"name": "computer_use", "description": "Use a mouse to interact with a computer.", "notes": "Click with the cursor tip centered on targets; avoid edges unless asked. Do not use other tools (type, key, scroll, left_click_drag). Only left_click are allowed.", "parameters": {"type": "object", "required": ["action"], "properties": {"action": {"type": "string", "enum": ["left_click"],"description": "The action to perform."}, "coordinate": {"type": "array", "description": "(x, y): pixels from left/top. Required for action=left_click."}}}}
+</tools>
+
+For each function call, return a JSON object with function name and arguments within <tool_call> ... </tool_call> XML tags:
+<tool_call>
+{"name": "<function-name>", "arguments": <args-json-object>}
+</tool_call>
