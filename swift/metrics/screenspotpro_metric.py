@@ -51,8 +51,9 @@ def compute_screenspotpro(data_list, metric):
     num_action = len(data_list)
     for data in tqdm(data_list, total=len(data_list)):
         label, pred = data['solution'], data['response']
-        para, image_path = json.loads(data['additional_paras']), data["images"][0]['path']
-        # para, image_path = data['additional_paras'], data["images"][0]['path']
+        raw_para = data['additional_paras']
+        para = json.loads(raw_para) if isinstance(raw_para, str) else raw_para
+        image_path = data["images"][0]['path'] if isinstance(data["images"][0], dict) else data["images"][0]
 
         if 'ground_qwen3' in metric:
             pred_action = extract_ground(pred)
@@ -127,8 +128,13 @@ def compute_screenspotpro(data_list, metric):
     }
 
     print("\n=== Group-wise Accuracy ===")
-    for group, vals in metrics.items():
-        print(f"{group}: text={vals['text']}%, icon={vals['icon']}%")
+    GROUP_ORDER = ["CAD", "Dev", "Creative", "Scientific", "Office", "OS"]
+    for group in GROUP_ORDER:
+        if group in metrics:
+            vals = metrics[group]
+            print(f"  {group}: text={vals['text']}%, icon={vals['icon']}%")
+        else:
+            print(f"  {group}: N/A")
 
     print("\n=== Overall ===")
     print(overall)
@@ -136,35 +142,4 @@ def compute_screenspotpro(data_list, metric):
 
     return overall
 
-def get_latest_vdir(run_name):
-    base_dir = f"/mnt/vlm-ks3/zhangyan/cvpr_code/ms-swift-qwen3vl/output/{run_name}"
-    # 列出所有以 v 开头的目录
-    v_dirs = [d for d in os.listdir(base_dir) if d.startswith("v") and os.path.isdir(os.path.join(base_dir, d))]
-    if not v_dirs:
-        return None
 
-    # 排序：v 后面的数字可能两位三位，所以按目录名整体排序
-    v_dirs_sorted = sorted(v_dirs, key=lambda x: int(x.split("-")[0][1:]))  
-    latest = v_dirs_sorted[-1]
-
-    return os.path.join(base_dir, latest) + "/checkpoint-*"
-
-if __name__ == "__main__":
-    # 1. single ckpt 
-    # # # zero shot
-    # jsonl_path = "/mnt/vlm-ks3/zhangyan/nips_code/opd/useful_output/useful_output/qwen3vl/screenspotpro/8b.jsonl"
-
-    # # 2
-    # # train multiple ckpt 
-    # for ckpt_num in range(5, 70, 5):
-    #     jsonl_path = f"/mnt/vlm-ks3/zhangyan/nips_code/opd/output/v51_opsd/v1-20260331-152348/checkpoint-{ckpt_num}-merged/infer_result/screenspotpro.jsonl"
-    #     metric = "screenspotpro_navi_qwen3"
-    #     data_list = read_from_jsonl(jsonl_path)
-    #     compute_screenspotpro(data_list, metric )
-
-    
-
-    jsonl_path = "/mnt/vlm-ks3/zhangyan/nips_code/opd/output/v53_sft/v0-20260331-205929/checkpoint-151/infer_result/screenspotpro.jsonl"
-    metric = "screenspotpro_navi_qwen3"
-    data_list = read_from_jsonl(jsonl_path)
-    compute_screenspotpro(data_list, metric )

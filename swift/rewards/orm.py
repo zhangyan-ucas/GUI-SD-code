@@ -9,6 +9,9 @@ import json
 
 from swift.infer_engine import InferRequest
 from swift.cus_rewards.ground_reward import GroundAcc, GroundFormat
+from swift.cus_rewards.g2_reward import G2Acc, G2Format
+from swift.cus_rewards.bbox_reward import BBoxReward, BBoxFormat
+
 
 class ORM:
     """Base class for synchronous outcome reward models (ORM).
@@ -454,6 +457,10 @@ orms = {
     'repetition': RepetitionPenalty,
     'soft_overlong': SoftOverlong,
     'ground-acc': GroundAcc, 
-    'ground-format': GroundFormat
+    'ground-format': GroundFormat,
+    'g2acc': G2Acc, 
+    'g2format': G2Format,
+    'bbox-reward': BBoxReward,
+    'bbox-format': BBoxFormat,
 
 }

@@ -26,7 +26,9 @@ from swift.utils import (JsonlWriter, get_logger, is_swanlab_available, is_wandb
 from .rollout_mixin import DataType, RolloutTrainerMixin
 from .utils import (get_gather_if_zero3_context, identity_data_collator, prepare_deepspeed, profiling_context,
                     profiling_decorator)
-from PIL import Image, ImageDraw
+import math
+import numpy as np
+from PIL import Image, ImageDraw, ImageFilter
 
 try:
     from liger_kernel.chunked_loss import LigerFusedLinearJSDLoss
@@ -91,6 +93,11 @@ class OPSDTrainer(RolloutTrainerMixin, SwiftMixin, HFGKDTrainer):
         self.teacher_model.eval()
         if self.args.offload_teacher_model:
             self.offload_model(self.accelerator.unwrap_model(self.teacher_model))
+
+        # Initialize EMA for teacher model
+        self.ema_decay = getattr(args, 'opsd_ema_decay', 0.0)
+        if self.ema_decay > 0:
+            logger.info(f"EMA enabled for teacher model with decay={self.ema_decay}")
 
         # Initialize rollout infrastructure for vLLM support
         self.prepare_rollout()
@@ -195,39 +202,68 @@ class OPSDTrainer(RolloutTrainerMixin, SwiftMixin, HFGKDTrainer):
             mask_teacher = shifted_teacher_labels != -100
 
             # =========================================================
-            # 新增：计算三位数以内的位置感知权重 (Position-Aware Weighting)
+            # Token 权重 (两个正交维度的组合)
+            # 维度1 - 基础权重:  "linear" → 数字位 N-k, 非数字 non_digit_w
+            #                    "uniform" → 全部 1.0
+            # 维度2 - entropy:   含 "entropy" → 再乘 (1 - H/H_max)
+            #
+            # 四种模式:
+            #   "uniform"          — 全 1.0
+            #   "linear"           — 数字位 N-k, 非数字 non_digit_w
+            #   "uniform-entropy"  — 全 1.0 × teacher confidence
+            #   "linear-entropy"   — 数字位 N-k × teacher confidence
             # =========================================================
             if not hasattr(self, '_digit_tokens'):
-                # 缓存 0-9 对应的 Token IDs
                 self._digit_tokens = set(self.template.tokenizer.encode(str(i), add_special_tokens=False)[-1] for i in range(10))
             
-            weights = torch.ones_like(shifted_student_labels, dtype=torch.float32)
-            seqs = shifted_student_labels.tolist()
-            for b, seq in enumerate(seqs):
-                i = 0
-                while i < len(seq):
-                    if seq[i] in self._digit_tokens:
-                        j = i
-                        while j < len(seq) and seq[j] in self._digit_tokens:
-                            j += 1
-                        N = j - i
-                        
-                        for k in range(N):
-                            # # 坐标最大999(N<=3)。按 10^(N-1-k) 赋权：百位100，十位10，个位1
-                            # weights[b, i+k] = 10 ** (N - 1 - k)
-                            
-                            # 修改为线性递减 3.0 2.0 1.0 
-                            weights[b, i+k] = float(N - k)
-
-                            # # 修改为线性递减 3.0 2.0 1.0 
-                            # weights[b, i+k] = 1.0
-                    
-                        i = j
-                    else:
-                        i += 1
+            weight_mode = getattr(self.args, 'opsd_token_weight_mode', 'linear')
+            non_digit_w = getattr(self.args, 'opsd_non_digit_weight', 1.0)
+            max_digit_len = getattr(self.args, 'opsd_max_digit_len', 0)  # 0=不限制
+            
+            # Step 1: 计算 position-aware 基础权重
+            if 'linear' in weight_mode:
+                weights = torch.full_like(shifted_student_labels, non_digit_w, dtype=torch.float32)
+                seqs = shifted_student_labels.tolist()
+                for b, seq in enumerate(seqs):
+                    i = 0
+                    while i < len(seq):
+                        if seq[i] in self._digit_tokens:
+                            j = i
+                            while j < len(seq) and seq[j] in self._digit_tokens:
+                                j += 1
+                            N = j - i
+                            # 如果设置了 max_digit_len，截断权重上限
+                            # 例如 max_digit_len=3 时，4位数字 "1920" 的权重为 [3,3,2,1] 而非 [4,3,2,1]
+                            # 这样可以让不同坐标范围（norm1000 vs 绝对像素）的权重分布保持一致
+                            effective_N = min(N, max_digit_len) if max_digit_len > 0 else N
+                            for k in range(N):
+                                # 从末尾开始计算：最后一位权重=1，倒数第二位=2，...
+                                # 超过 effective_N 的高位统一用 effective_N
+                                pos_from_end = N - k  # N, N-1, ..., 2, 1
+                                weights[b, i+k] = float(min(pos_from_end, effective_N))
+                            i = j
+                        else:
+                            i += 1
+            else:
+                # uniform
+                weights = torch.ones_like(shifted_student_labels, dtype=torch.float32)
             
             # 取出有效部分的 weights (形状对齐 mask_student)
             valid_weights = weights[mask_student]
+            
+            # Step 2: entropy 模式额外乘以 teacher confidence (归一化到0-1)
+            # 注意：teacher 和 student 序列长度不同，所以必须先提取 teacher 有效部分再算 entropy
+            if 'entropy'  in weight_mode:
+                # 先取出 teacher 有效 response 部分的 logits [N_valid, V]
+                valid_teacher_logits = outputs_teacher.logits[mask_teacher]
+                teacher_probs = F.softmax(valid_teacher_logits, dim=-1)  # [N_valid, V]
+                token_entropy = -(teacher_probs * torch.log(teacher_probs + 1e-8)).sum(dim=-1)  # [N_valid]
+                del teacher_probs, valid_teacher_logits
+                # 归一化 confidence: 1 = teacher完全确定, 0 = 完全均匀分布
+                vocab_size = outputs_teacher.logits.size(-1)
+                H_max = torch.log(torch.tensor(vocab_size, dtype=token_entropy.dtype, device=token_entropy.device))
+                confidence = 1.0 - token_entropy / H_max  # [N_valid], 范围 [0, 1]
+                valid_weights = valid_weights * confidence
             # =========================================================
 
             # 提取出有效的 response logits（要求 response 的 token 必须完全一致，否则维度报错）
@@ -256,51 +292,105 @@ class OPSDTrainer(RolloutTrainerMixin, SwiftMixin, HFGKDTrainer):
 
     def mask_processor(self, data):
         if isinstance(data['additional_paras'], str):
-            # data['additional_paras'] = eval(data['additional_paras'])
             data['additional_paras'] = json.loads(data['additional_paras'])
 
         image_path = data['images'][0]['path']
         x1, y1, x2, y2 = map(int, data['solution']['arguments']['coordinate'])
         
-        # 确定保存路径
         save_path = os.path.join(self.args.opsd_mask_dir, f"{data['sample_id']}_{os.path.basename(image_path)}")
-        
-        # 【新增】确保保存的文件夹存在，避免因目录不存在而报错
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         
         img = Image.open(image_path).convert("RGB")
-        W, H = img.size # 获取原图宽高
-        res = Image.new("RGB", (W, H), "black") 
+        W, H = img.size
         
-        # 计算中心点和 w, h
-        cx, cy, w, h = (x1 + x2) // 2, (y1 + y2) // 2, x2 - x1, y2 - y1
+        mask_mode = getattr(self.args, 'opsd_mask_mode', 'zoom_in')
+        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+        bbox_w, bbox_h = x2 - x1, y2 - y1
         
-        # 计算区域坐标，并严格限制在图像边界 [0, W] 和 [0, H] 之间
-        crop_x1 = max(0, cx - W // 4)
-        crop_y1 = max(0, cy - H // 4)
-        crop_x2 = min(W, cx + W // 4)
-        crop_y2 = min(H, cy + H // 4)
+        if mask_mode == 'zoom_in':
+            # 固定裁剪 W/2 × H/2 区域
+            res = Image.new("RGB", (W, H), "black") 
+            crop_x1 = max(0, cx - W // 4)
+            crop_y1 = max(0, cy - H // 4)
+            crop_x2 = min(W, cx + W // 4)
+            crop_y2 = min(H, cy + H // 4)
+            if crop_x1 < crop_x2 and crop_y1 < crop_y2:
+                crop_box = (crop_x1, crop_y1, crop_x2, crop_y2)
+                res.paste(img.crop(crop_box), (crop_x1, crop_y1))
+
+        elif mask_mode == 'adaptive':
+            # 方案B：基于bbox自适应缩放 + 最小面积保底
+            zoom_ratio = getattr(self.args, 'opsd_zoom_ratio', 2.0)
+            min_area_frac = getattr(self.args, 'opsd_min_area_frac', 0.1)
+            
+            # 以bbox尺寸为基准向外扩展
+            pad_w = int(bbox_w * zoom_ratio)
+            pad_h = int(bbox_h * zoom_ratio)
+            
+            # 保底：至少暴露原图的 min_area_frac 面积
+            min_half_w = int(W * math.sqrt(min_area_frac) / 2)
+            min_half_h = int(H * math.sqrt(min_area_frac) / 2)
+            pad_w = max(pad_w, min_half_w)
+            pad_h = max(pad_h, min_half_h)
+            
+            crop_x1 = max(0, cx - pad_w)
+            crop_y1 = max(0, cy - pad_h)
+            crop_x2 = min(W, cx + pad_w)
+            crop_y2 = min(H, cy + pad_h)
+            
+            res = Image.new("RGB", (W, H), "black")
+            if crop_x1 < crop_x2 and crop_y1 < crop_y2:
+                crop_box = (crop_x1, crop_y1, crop_x2, crop_y2)
+                res.paste(img.crop(crop_box), (crop_x1, crop_y1))
+
+        elif mask_mode == 'gaussian':
+            # 方案C：高斯渐变模糊（Soft Mask）
+            # 距离bbox越远 → 越暗/越模糊，bbox内部保持清晰
+            sigma_ratio = getattr(self.args, 'opsd_gaussian_sigma_ratio', 1.5)
+            min_area_frac = getattr(self.args, 'opsd_min_area_frac', 0.1)
+            sigma = max(bbox_w, bbox_h) * sigma_ratio
+            # 保底：sigma至少为图像短边 * sqrt(min_area_frac)，防止小目标衰减过快
+            min_sigma = min(W, H) * math.sqrt(min_area_frac)
+            sigma = max(sigma, min_sigma)
+            
+            img_arr = np.array(img, dtype=np.float32)
+            
+            # 计算每个像素到bbox的最短距离（bbox内部距离为0）
+            xs = np.arange(W)[None, :]  # (1, W)
+            ys = np.arange(H)[:, None]  # (H, 1)
+            
+            dx = np.maximum(x1 - xs, 0) + np.maximum(xs - x2, 0)  # (H, W)
+            dy = np.maximum(y1 - ys, 0) + np.maximum(ys - y2, 0)  # (H, W)
+            dist = np.sqrt(dx.astype(np.float64)**2 + dy.astype(np.float64)**2)
+            
+            # 高斯衰减：bbox内部alpha=1，外部随距离指数衰减
+            alpha = np.exp(-dist**2 / (2 * sigma**2)).astype(np.float32)
+            alpha = alpha[:, :, None]  # (H, W, 1) 用于广播到RGB三通道
+            
+            res_arr = (img_arr * alpha).astype(np.uint8)
+            res = Image.fromarray(res_arr)
+
+        elif mask_mode == 'no_mask':
+            # no_mask: 直接使用原图，不画bbox
+            res = img.copy()
+
+        else:
+            # original: 直接使用原图 + 画bbox
+            res = img.copy()
         
-        # 仅当计算出的有效宽高大于0时才裁剪粘贴
-        if crop_x1 < crop_x2 and crop_y1 < crop_y2:
-            crop_box = (crop_x1, crop_y1, crop_x2, crop_y2)
-            res.paste(img.crop(crop_box), (crop_x1, crop_y1))
+        # 画绿色 gt_bbox 框（no_mask 模式除外）
+        if mask_mode != 'no_mask':
+            line_width = 5
+            draw_x1 = x1 - line_width
+            draw_y1 = y1 - line_width
+            draw_x2 = x2 + line_width
+            draw_y2 = y2 + line_width
+            ImageDraw.Draw(res).rectangle(
+                [draw_x1, draw_y1, draw_x2, draw_y2], 
+                outline="green", 
+                width=line_width
+            )
         
-        # 【修改】动态向外扩展框的坐标，防止线宽遮挡内容
-        line_width = 5
-        draw_x1 = x1 - line_width
-        draw_y1 = y1 - line_width
-        draw_x2 = x2 + line_width
-        draw_y2 = y2 + line_width
-        
-        # 画绿色 gt_bbox 框
-        ImageDraw.Draw(res).rectangle(
-            [draw_x1, draw_y1, draw_x2, draw_y2], 
-            outline="green", 
-            width=line_width
-        )
-        
-        # 【新增】保存图像到指定路径
         res.save(save_path)
         
         return save_path
@@ -327,14 +417,48 @@ class OPSDTrainer(RolloutTrainerMixin, SwiftMixin, HFGKDTrainer):
 
                 # ------ 处理 Teacher 的输入 ------
                 teacher_data = deepcopy(data)
+                hint_mode = getattr(self.args, 'opsd_hint_mode', 'hint')
                 if 'messages' in teacher_data:
-                    # 需要改变文字内容和图像内容
                     assert teacher_data['messages'][1]['role'] == "user"
-                    teacher_data['messages'][1]['content'] += "Hint: The answer is located within the green rectangle."
-                    # teacher_data['messages'][1]['content'] = "Click the center point of the green bounding box."
 
-                    mask_img_path = self.mask_processor(teacher_data)
-                    teacher_data['images'][0]['path'] = mask_img_path
+                    if hint_mode == 'none':
+                        # 不加任何hint，teacher输入与student完全一致
+                        pass
+                    elif hint_mode == 'hint':
+                        # 加绿框遮罩图 + hint文本提示
+                        teacher_data['messages'][1]['content'] += " Hint: The answer is located within the green rectangle."
+                        mask_img_path = self.mask_processor(teacher_data)
+                        teacher_data['images'][0]['path'] = mask_img_path
+                    elif hint_mode == 'gt':
+                        # 加绿框遮罩图 + 直接给出gt归一化中心坐标
+                        gt_bbox = teacher_data['solution']['arguments']['coordinate']
+                        additional = teacher_data.get('additional_paras', '{}')
+                        if isinstance(additional, str):
+                            additional = json.loads(additional)
+                        image_size = additional['image_size']
+                        # 计算归一化中心点 (与数据构建一致: bbox→norm1000→中心)
+                        norm_bbox = [
+                            int(gt_bbox[0] / image_size[0] * 1000),
+                            int(gt_bbox[1] / image_size[1] * 1000),
+                            int(gt_bbox[2] / image_size[0] * 1000),
+                            int(gt_bbox[3] / image_size[1] * 1000),
+                        ]
+                        norm_cx = (norm_bbox[0] + norm_bbox[2]) // 2
+                        norm_cy = (norm_bbox[1] + norm_bbox[3]) // 2
+                        gt_tool_call = f'<tool_call>\n{{"name": "computer_use", "arguments": {{"action": "left_click", "coordinate": [{norm_cx}, {norm_cy}]}}}}\n</tool_call>'
+                        user_text = teacher_data['messages'][1]['content']
+                        teacher_data['messages'][1]['content'] = (
+                            f"{user_text}\n\n"
+                            f"[IMPORTANT] The correct answer has been verified. "
+                            f"Do NOT analyze the image. Simply repeat the exact output below:\n"
+                            f"{gt_tool_call}"
+                        )
+                        
+
+                        mask_img_path = self.mask_processor(teacher_data)
+                        teacher_data['images'][0]['path'] = mask_img_path
+                    else:
+                        raise ValueError(f"Unknown opsd_hint_mode: {hint_mode}, expected 'none', 'hint', or 'gt'")
 
                 if 'response_token_ids' in teacher_data and teacher_data['response_token_ids']:
                     teacher_data['messages'] = replace_assistant_response_with_ids(teacher_data['messages'], teacher_data['response_token_ids'])
@@ -439,7 +563,48 @@ class OPSDTrainer(RolloutTrainerMixin, SwiftMixin, HFGKDTrainer):
 
         with self.template.forward_context(self.model, encoded_inputs):
             loss = HFSFTTrainer.training_step(self, model, encoded_inputs, num_items_in_batch)
+
+        # EMA update teacher model after each training step
+        if self.ema_decay > 0:
+            self._ema_update_teacher()
+
         return loss
+
+    @torch.no_grad()
+    def _ema_update_teacher(self):
+        """Update teacher model parameters using EMA of student parameters.
+
+        θ_teacher = decay * θ_teacher + (1 - decay) * θ_student
+
+        Handles:
+        - offload_teacher_model: load teacher to GPU before update, offload after
+        - DeepSpeed ZeRO3: gather sharded parameters before update
+        """
+        decay = self.ema_decay
+
+        # If teacher is offloaded to CPU, load it back to GPU first
+        load_context = self.load_teacher_model_context() if self.args.offload_teacher_model else nullcontext()
+
+        # If teacher uses DeepSpeed ZeRO3, need to gather full parameters
+        if self.is_teacher_ds3:
+            import deepspeed
+            gather_context = lambda params: deepspeed.zero.GatheredParameters(params, modifier_rank=0)
+        else:
+            gather_context = lambda params: nullcontext()
+
+        with load_context:
+            student_model = self.accelerator.unwrap_model(self.model)
+            teacher_model = self.accelerator.unwrap_model(self.teacher_model)
+
+            student_params = dict(student_model.named_parameters())
+
+            for name, teacher_param in teacher_model.named_parameters():
+                if name in student_params:
+                    student_param = student_params[name]
+                    with gather_context([teacher_param]):
+                        # Only rank 0 modifies under ZeRO3; for ZeRO2/non-DS all ranks update
+                        if not self.is_teacher_ds3 or self.accelerator.is_main_process:
+                            teacher_param.data.mul_(decay).add_(student_param.data.to(teacher_param.device), alpha=1.0 - decay)
 
     def prediction_step(self, model, inputs, *args, **kwargs):
         # Prediction uses full messages

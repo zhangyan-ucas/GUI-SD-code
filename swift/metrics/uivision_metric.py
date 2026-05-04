@@ -137,25 +137,5 @@ def compute_uivision(data_list, metric):
 
     return overall
 
-def get_latest_vdir(run_name):
-    base_dir = f"/mnt/vlm-ks3/zhangyan/cvpr_code/ms-swift-qwen3vl/output/{run_name}"
-    # 列出所有以 v 开头的目录
-    v_dirs = [d for d in os.listdir(base_dir) if d.startswith("v") and os.path.isdir(os.path.join(base_dir, d))]
-    if not v_dirs:
-        return None
 
-    # 排序：v 后面的数字可能两位三位，所以按目录名整体排序
-    v_dirs_sorted = sorted(v_dirs, key=lambda x: int(x.split("-")[0][1:]))  
-    latest = v_dirs_sorted[-1]
 
-    return os.path.join(base_dir, latest) + "/checkpoint-*"
-
-if __name__ == "__main__":
-    # 1. single ckpt 
-    # # zero shot
-    jsonl_path = "/mnt/vlm-ks3/zhangyan/nips_code/opd/useful_output/useful_output/qwen3vl/ui-vision/8b.jsonl"
-   
-    metric = "screenspotpro_navi_qwen3"
-    data_list = read_from_jsonl(jsonl_path)
-
-    compute_uivision(data_list, metric)

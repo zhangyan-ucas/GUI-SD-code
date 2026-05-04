@@ -199,7 +199,16 @@ class TrainArgumentsMixin:
     use_flash_ckpt: bool = False
 
     # add
-    opsd_mask_dir: str = "/vlm-ssd/zhangyan/cache/opd_cache"
+    opsd_mask_dir: str = "cache/opd_cache"
+    opsd_mask_mode: str = "zoom_in"  # "zoom_in": 固定裁剪中心区域; "adaptive": 自适应bbox缩放+最小面积保底; "gaussian": 高斯渐变模糊; "original": 原图+画bbox; "no_mask": 原图不画bbox
+    opsd_zoom_ratio: float = 2.0  # adaptive模式: 裁剪区域 = bbox向外扩展zoom_ratio倍
+    opsd_min_area_frac: float = 0.1  # adaptive模式: 最小可见面积占原图比例 (保底)
+    opsd_gaussian_sigma_ratio: float = 1.5  # gaussian模式: sigma = max(bbox_w, bbox_h) * sigma_ratio
+    opsd_token_weight_mode: str = "linear"  # "uniform": 全1.0; "linear": 数字N-k(百3十2个1); "uniform-entropy": 全1.0×teacher_confidence; "linear-entropy": 数字N-k×teacher_confidence
+    opsd_non_digit_weight: float = 1.0  # 非数字token的权重
+    opsd_max_digit_len: int = 0  # linear模式下数字串的最大有效长度，超过此长度的数字串权重会被截断。0=不限制(默认); 3=适用于norm1000坐标(Qwen3-VL); 4=适用于绝对像素坐标(Qwen2.5-VL)
+    opsd_hint_mode: str = "hint"  # "none": 不加hint，teacher输入与student一致; "hint": 加绿框+hint文本(当前行为); "gt": 直接在hint中给出gt归一化中心坐标
+    opsd_ema_decay: float = 0.0  # EMA decay for teacher model. 0=disabled(fixed teacher), 0.999=slow update, 0.99=fast update
 
     @staticmethod
     def _patch_liger_kernel():
