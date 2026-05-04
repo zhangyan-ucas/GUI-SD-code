@@ -1,7 +1,7 @@
 <h1 align="center"> Learn where to Click from Yourself: On-Policy Self-Distillation for GUI Grounding</h1>
 <p align="center">
 <h4 align="center">This is the official repository of the paper <a href="https://arxiv.org/abs/2605.00642">GUI-SD</a>.</h4>
-<h5 align="center"><em><a href="https://scholar.google.com/citations?hl=zh-CN&user=IUNcUO0AAAAJ">Yan Zhang</a>, Daiqing Wu, Huawen Shen, Yu Zhou, Can Ma </em></h5>
+<h5 align="center"><em><a href="https://scholar.google.com/citations?hl=zh-CN&user=IUNcUO0AAAAJ">Yan Zhang</a>, <a href="https://scholar.google.com/citations?user=EMhXDBMAAAAJ&hl=zh-CN">Daiqing Wu</a>, Huawen Shen, Yu Zhou, Can Ma </em></h5>
 
 
 # News
