@@ -7,6 +7,8 @@
 
 # News
 
+🔥 **We are actively seeking job opportunities (research/engineering positions) in the areas of Multimodal LLMs, GUI Agents, and Reinforcement Learning.** If you are interested in our work or have relevant openings, please feel free to reach out via email: [zhangyan2022@iie.ac.cn](mailto:zhangyan2022@iie.ac.cn)
+
 ***2025/04/30***
 
 - We are the first to introduce on-policy self-distillation for GUI grounding.
@@ -143,10 +145,8 @@ Results are saved to `<checkpoint>/infer_result/<dataset_name>.jsonl`.
 
 This project is for research purpose only. For any other questions please contact [zhangyan2022@iie.ac.cn](mailto:zhangyan2022@iie.ac.cn).
 
-🔥 **We are actively seeking job opportunities (research/engineering positions) in the areas of Multimodal LLMs, GUI Agents, and Reinforcement Learning.** If you are interested in our work or have relevant openings, please feel free to reach out via email!
-
 ## Acknowledgements
 
 This project is built upon [ms-swift](https://github.com/modelscope/ms-swift), an efficient and lightweight framework for LLM/VLM fine-tuning and inference. We sincerely thank the ms-swift team for their excellent open-source contribution.
 
-We also thank the open-source dataset [ScaleQuA](https://github.com/AlibabaResearch/DAMO-ConvAI/tree/main/scalequa) for providing high-quality GUI grounding data.
+We also thank the open-source dataset [ScaleCUA](https://huggingface.co/datasets/OpenGVLab/ScaleCUA-Data) for providing high-quality GUI grounding data.
