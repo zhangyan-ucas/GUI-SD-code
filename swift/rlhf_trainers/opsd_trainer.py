@@ -449,11 +449,8 @@ class OPSDTrainer(RolloutTrainerMixin, SwiftMixin, HFGKDTrainer):
                         user_text = teacher_data['messages'][1]['content']
                         teacher_data['messages'][1]['content'] = (
                             f"{user_text}\n\n"
-                            f"[IMPORTANT] The correct answer has been verified. "
-                            f"Do NOT analyze the image. Simply repeat the exact output below:\n"
-                            f"{gt_tool_call}"
+                            f"The correct answer: {gt_tool_call}"
                         )
-                        
 
                         mask_img_path = self.mask_processor(teacher_data)
                         teacher_data['images'][0]['path'] = mask_img_path
