@@ -9,10 +9,13 @@
 
 🔥 **We are actively seeking job opportunities (research/engineering positions) in the areas of Multimodal LLMs, GUI Agents, and Reinforcement Learning.** If you are interested in our work or have relevant openings, please feel free to reach out via email: [zhangyan2022@iie.ac.cn](mailto:zhangyan2022@iie.ac.cn)
 
-***2025/04/30***
+***2026/04/30***
 
 - We are the first to introduce on-policy self-distillation for GUI grounding.
 - We release the code and training data.
+
+***2026/09/24***
+- We release **GUI-SD v2**! Check out our paper: [Learn How to Act from Your Own Interactions: On-Policy Self-Distillation for GUI Agents](https://arxiv.org/abs/2609.27307).
 
 # Installation
 
